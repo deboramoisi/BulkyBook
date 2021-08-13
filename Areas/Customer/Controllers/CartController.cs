@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.UI.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Options;
 using Stripe;
 using System;
 using System.Collections.Generic;
@@ -15,6 +16,8 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Threading.Tasks;
+using Twilio;
+using Twilio.Rest.Api.V2010.Account;
 
 namespace BulkyBook.Areas.Customer.Controllers
 {
@@ -25,6 +28,8 @@ namespace BulkyBook.Areas.Customer.Controllers
         private readonly IEmailSender _emailSender;
         private readonly UserManager<IdentityUser> _userManager;
 
+        private TwilioSettings _twilioOptions { get; set; }
+
         // loaded when it's get and post and modified in view without passing as argument
         [BindProperty]
         public ShoppingCartVM ShoppingCartVM { get; set; }
@@ -32,12 +37,14 @@ namespace BulkyBook.Areas.Customer.Controllers
         public CartController(
             IUnitOfWork unitOfWork,
             IEmailSender emailSender,
-            UserManager<IdentityUser> userManager
+            UserManager<IdentityUser> userManager,
+            IOptions<TwilioSettings> twilioOptions
             )
         {
             _unitOfWork = unitOfWork;
             _emailSender = emailSender;
             _userManager = userManager;
+            _twilioOptions = twilioOptions.Value;
         }
 
         public IActionResult Index()
@@ -209,7 +216,6 @@ namespace BulkyBook.Areas.Customer.Controllers
             _unitOfWork.OrderHeader.Add(ShoppingCartVM.OrderHeader);
             _unitOfWork.Save();
 
-            List<OrderDetails> orderDetailsList = new List<OrderDetails>();
             foreach(var item in ShoppingCartVM.ListCart)
             {
                 item.Price = SD.GetPriceBasedOnQuantity(item.Count, item.Product.Price, 
@@ -233,7 +239,10 @@ namespace BulkyBook.Areas.Customer.Controllers
 
             if (stripeToken == null)
             {
-
+                // order will be created for delayed payment for authorized company
+                ShoppingCartVM.OrderHeader.PaymentDueDate = DateTime.Now.AddDays(30);
+                ShoppingCartVM.OrderHeader.PaymentStatus = SD.PaymentStatusDelayedPayment;
+                ShoppingCartVM.OrderHeader.OrderStatus = SD.StatusApproved;
             }
             else
             {
@@ -249,7 +258,7 @@ namespace BulkyBook.Areas.Customer.Controllers
                 var service = new ChargeService();
                 Charge charge = service.Create(options); // create transaction on the credit card
 
-                if (charge.BalanceTransactionId == null)
+                if (charge.Id == null)
                 {
                     ShoppingCartVM.OrderHeader.PaymentStatus = SD.PaymentStatusRejected;
                 }
@@ -271,8 +280,65 @@ namespace BulkyBook.Areas.Customer.Controllers
             return RedirectToAction("OrderConfirmation", "Cart", new { id = ShoppingCartVM.OrderHeader.Id });
         }
 
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        [ActionName("Details")]
+        public IActionResult Details(string stripeToken)
+        {
+            OrderHeader orderHeader = _unitOfWork.OrderHeader.GetFirstOrDefault(u => u.Id == ShoppingCartVM.OrderHeader.Id, 
+                                                                                    includeProperties: "ApplicationUser");
+
+            if (stripeToken != null)
+            {
+                // process the payment
+                var options = new ChargeCreateOptions()
+                {
+                    Amount = Convert.ToInt32(orderHeader.OrderTotal * 100),
+                    Currency = "usd",
+                    Description = $"Order ID : {orderHeader.Id}",
+                    Source = stripeToken
+                };
+
+                var service = new ChargeService();
+                Charge charge = service.Create(options); // create transaction on the credit card
+
+                if (charge.Id == null)
+                {
+                    orderHeader.PaymentStatus = SD.PaymentStatusRejected;
+                }
+                else
+                {
+                    orderHeader.TransactionId = charge.BalanceTransactionId;
+                }
+
+                if (charge.Status.ToLower() == "succeeded")
+                {
+                    orderHeader.PaymentStatus = SD.PaymentStatusApproved;
+                    orderHeader.PaymentDate = DateTime.Now;
+                }
+
+                _unitOfWork.Save();
+            }
+            return RedirectToAction("Details", "Order", new { id = orderHeader.Id });
+        }
+
         public IActionResult OrderConfirmation(int id)
         {
+            OrderHeader orderHeader = _unitOfWork.OrderHeader.GetFirstOrDefault(u => u.Id == id);
+            TwilioClient.Init(_twilioOptions.AccountSid, _twilioOptions.AuthToken);
+
+            try
+            {
+                var message = MessageResource.Create(
+                        body: "Order Placed on Bulky Book. Your Order ID: " + id,
+                        from: new Twilio.Types.PhoneNumber(_twilioOptions.PhoneNumber),
+                        to: new Twilio.Types.PhoneNumber(orderHeader.PhoneNumber)
+                    );
+            }
+            catch(Exception e)
+            {
+
+            }
             return View(id);
         }
 

@@ -9,6 +9,8 @@ using Microsoft.AspNetCore.Mvc.Rendering;
 using System.IO;
 using Microsoft.AspNetCore.Authorization;
 using BulkyBook.Utility;
+using System.Threading.Tasks;
+using System.Collections.Generic;
 
 namespace BulkyBook.Areas.Admin.Controllers
 {
@@ -32,13 +34,15 @@ namespace BulkyBook.Areas.Admin.Controllers
             return View();
         }
 
-        public IActionResult Upsert(int? id)
+        public async Task<IActionResult> Upsert(int? id)
         {
+            IEnumerable<Category> CatList = await _unitOfWork.Category.GetAllAsync();
+
             ProductVM productVM = new ProductVM()
             {
                 Product = new Product(),
                 // convert into a select list item
-                CategoryList = _unitOfWork.Category.GetAll().Select(i => new SelectListItem 
+                CategoryList = CatList.Select(i => new SelectListItem 
                 { 
                     Text = i.Name,
                     Value = i.Id.ToString()
@@ -66,7 +70,7 @@ namespace BulkyBook.Areas.Admin.Controllers
 
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public IActionResult Upsert(ProductVM productVM)
+        public async Task<IActionResult> Upsert(ProductVM productVM)
         {
             if (ModelState.IsValid)
             {
@@ -116,7 +120,8 @@ namespace BulkyBook.Areas.Admin.Controllers
             } 
             else
             {
-                productVM.CategoryList = _unitOfWork.Category.GetAll().Select(i => new SelectListItem
+                IEnumerable<Category> CatList = await _unitOfWork.Category.GetAllAsync();
+                productVM.CategoryList = CatList.Select(i => new SelectListItem
                 {
                     Text = i.Name,
                     Value = i.Id.ToString()
@@ -154,10 +159,13 @@ namespace BulkyBook.Areas.Admin.Controllers
             }
 
             string webRootPath = _hostEnvironment.WebRootPath;
-            var imagePath = Path.Combine(webRootPath, objFromDb.ImageUrl.TrimStart('\\'));
-            if (System.IO.File.Exists(imagePath))
+            if (objFromDb.ImageUrl != null)
             {
-                System.IO.File.Delete(imagePath);
+                var imagePath = Path.Combine(webRootPath, objFromDb.ImageUrl.TrimStart('\\'));
+                if (System.IO.File.Exists(imagePath))
+                {
+                    System.IO.File.Delete(imagePath);
+                }
             }
             _unitOfWork.Product.Remove(objFromDb);
             _unitOfWork.Save();
